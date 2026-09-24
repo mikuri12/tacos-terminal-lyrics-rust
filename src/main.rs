@@ -4,6 +4,7 @@ mod player;
 mod render;
 mod term;
 mod theme;
+mod ytmgo;
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -52,7 +53,7 @@ fn parse_args() -> Result<Args, String> {
         font: Font::Block,
         karaoke: true,
         refresh_ms: 50,
-        show_header: false,
+        show_header: true,
         theme_path: None,
     };
     let mut it = std::env::args().skip(1);
@@ -201,10 +202,31 @@ fn run() -> Result<(), String> {
             return finish();
         }
 
+        // Fallback: no MPRIS player -> check the ytmgo backend (mpv IPC +
+        // its SQLite queue). ytmgo's mpv doesn't expose MPRIS.
+        if current.is_none() && ytmgo::is_running() {
+            if let Some(track) = ytmgo::current_track() {
+                let new = ("ytmgo".to_string(), track);
+                if current.as_ref() != Some(&new) {
+                    current = Some(new);
+                    lyrics = None;
+                }
+            }
+        }
+        if current.is_none() && !ytmgo::is_running() {
+            // clear a stale ytmgo binding if the socket went away
+            if let Some((name, _)) = current.as_ref() {
+                if name == "ytmgo" {
+                    current = None;
+                    lyrics = None;
+                }
+            }
+        }
+
         let Some((bus_name, track)) = current.clone() else {
             draw_simple(
                 &theme,
-                "•••",
+                "WAITING",
                 "waiting for a player…",
                 &mut last_frame,
                 &args,
@@ -214,7 +236,16 @@ fn run() -> Result<(), String> {
         };
 
         if lyrics.is_none() {
-            lyrics = finder.get(&track);
+            // ytmgo keeps its own synced-lyrics cache; use it first,
+            // fall back to lrclib for everything else.
+            lyrics = if bus_name == "ytmgo" {
+                ytmgo::cached_lyrics()
+                    .map(|lrc| lrc::parse_lrc(&lrc))
+                    .filter(|l| !l.lines.is_empty())
+                    .or_else(|| finder.get(&track))
+            } else {
+                finder.get(&track)
+            };
         }
 
         let Some(lyr) = lyrics.as_ref() else {
@@ -229,13 +260,21 @@ fn run() -> Result<(), String> {
             continue;
         };
 
-        let paused = matches!(
-            player::status_of(&bus_name),
-            None | Some(PlaybackStatus::Paused) | Some(PlaybackStatus::Stopped)
-        );
+        // Position + pause state from the right backend.
+        let (pos, paused) = if bus_name == "ytmgo" {
+            (ytmgo::position_secs(), ytmgo::is_paused().unwrap_or(false))
+        } else {
+            (
+                player::position_of(&bus_name),
+                matches!(
+                    player::status_of(&bus_name),
+                    None | Some(PlaybackStatus::Paused) | Some(PlaybackStatus::Stopped)
+                ),
+            )
+        };
 
         // Poll real position every tick: pause/seek just work, no drift.
-        if let Some(t) = player::position_of(&bus_name) {
+        if let Some(t) = pos {
             let frame = build_frame(lyr, t, paused, &args);
             if last_frame.as_ref() != Some(&frame) {
                 draw_lyric_frame(&theme, &frame, &track, &mut last_frame, &args)?;
@@ -262,7 +301,7 @@ fn build_frame(lyr: &lrc::Lyrics, t: f64, paused: bool, args: &Args) -> Frame {
         .unwrap_or("")
         .to_string();
     let line = if raw.is_empty() {
-        "•••".to_string()
+        "...".to_string()
     } else {
         raw
     };

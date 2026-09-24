@@ -65,8 +65,42 @@ const BLOCK_EQ: &[&str] = &["      ", "██████", "      ", "███
 const BLOCK_LT: &[&str] = &["   ██ ", "  ██  ", " ██   ", "  ██  ", "   ██ "];
 const BLOCK_GT: &[&str] = &[" ██   ", "  ██  ", "   ██ ", "  ██  ", " ██   "];
 const BLOCK_AT: &[&str] = &[" ████ ", "█    █", "█ ██ █", "█ ██ █", " ████ "];
+const BLOCK_BULLET: &[&str] = &["      ", "  ██  ", "  ██  ", "      ", "      "];
 
 fn block_glyph(c: char) -> Option<&'static [&'static str]> {
+    // Accented letters render as their base letter (no font space for
+    // every variant, and lyrics are full of them in Spanish etc.)
+    let c = match c {
+        'Á' => 'A',
+        'À' => 'A',
+        'Ä' => 'A',
+        'Â' => 'A',
+        'Ã' => 'A',
+        'Å' => 'A',
+        'É' => 'E',
+        'È' => 'E',
+        'Ë' => 'E',
+        'Ê' => 'E',
+        'Í' => 'I',
+        'Ì' => 'I',
+        'Ï' => 'I',
+        'Î' => 'I',
+        'Ó' => 'O',
+        'Ò' => 'O',
+        'Ö' => 'O',
+        'Ô' => 'O',
+        'Õ' => 'O',
+        'Ú' => 'U',
+        'Ù' => 'U',
+        'Ü' => 'U',
+        'Û' => 'U',
+        'Ñ' => 'N',
+        'Ç' => 'C',
+        'Ý' => 'Y',
+        '¡' => '!',
+        '¿' => '?',
+        _ => c,
+    };
     Some(match c {
         'A' => BLOCK_A,
         'B' => BLOCK_B,
@@ -128,6 +162,7 @@ fn block_glyph(c: char) -> Option<&'static [&'static str]> {
         '<' => BLOCK_LT,
         '>' => BLOCK_GT,
         '@' => BLOCK_AT,
+        '•' => BLOCK_BULLET,
         _ => return None,
     })
 }

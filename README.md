@@ -26,6 +26,12 @@ simplificado a un único binario:
   player activo (reproduciendo > pausado > con pista), y si cambias de
   player o de canción se detecta solo. Los players rotos del bus se
   saltan sin romper el escaneo.
+- **ytmgo sin MPRIS también funciona** — ytmgo reproduce con un mpv que
+  no expone MPRIS, así que hay un backend dedicado que lee la cola de
+  su base de datos (`~/.local/share/ytmgo/ytmgo.db`), la posición del
+  socket IPC de mpv (`/run/user/<uid>/ytmgo-mpv-*.sock`) y hasta
+  reutiliza su propio cache de letras sincronizadas antes de ir a
+  lrclib.
 - **Colores que siguen tu tema** — por defecto las letras usan slots de
   la paleta de tu terminal, así heredan tu colorscheme (y sus cambios
   en vivo) sin configurar nada. Si quieres colores exactos o que una
