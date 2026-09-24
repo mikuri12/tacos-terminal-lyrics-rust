@@ -3,7 +3,6 @@
 //! and the 256-color palette via OSC 4. No pywal, no matugen, no config.
 
 use std::io::{self, Write};
-use std::time::Duration;
 
 // ---------------------------------------------------------------------------
 // Raw mode
@@ -97,142 +96,6 @@ pub fn poll_key() -> Option<u8> {
 }
 
 // ---------------------------------------------------------------------------
-// Palette detection: query the terminal's own colors
-// ---------------------------------------------------------------------------
-
-/// An RGB color as reported by the terminal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Rgb(pub u8, pub u8, pub u8);
-
-impl Rgb {
-    fn sgr(&self) -> String {
-        format!("\x1b[38;2;{};{};{}m", self.0, self.1, self.2)
-    }
-}
-
-/// The terminal's theme colors, live-queried. fg = lyrics, bg = dimmed lyrics.
-#[derive(Debug, Clone, Copy)]
-pub struct Palette {
-    pub fg: Rgb,
-    pub bg: Rgb,
-    pub has_bg: bool,
-}
-
-impl Palette {
-    /// Color code (as ANSI string) for the active lyric text.
-    pub fn lyric(&self) -> String {
-        self.fg.sgr()
-    }
-
-    /// Dimmed color for the not-yet-sung part: fg blended 55% toward bg.
-    pub fn dim(&self) -> String {
-        let bg = if self.has_bg { self.bg } else { Rgb(0, 0, 0) };
-        let mix = |f: u8, b: u8| -> u8 { (f as u16 * 55 / 100 + b as u16 * 45 / 100) as u8 };
-        Rgb(
-            mix(self.fg.0, bg.0),
-            mix(self.fg.1, bg.1),
-            mix(self.fg.2, bg.2),
-        )
-        .sgr()
-    }
-}
-
-/// Query fg (OSC 10) and bg (OSC 11) colors from the terminal.
-///
-/// Works on xterm, kitty, foot, alacritty, wezterm, ghostty, konsole, st...
-/// (any terminal that answers OSC queries). When the terminal doesn't
-/// answer we fall back to SGR 39 (default foreground) - i.e. your normal
-/// text color - and SGR 2 (faint) for dimmed text.
-pub fn detect_palette() -> Palette {
-    let mut out = io::stdout();
-    let mut answers: Vec<String> = Vec::new();
-
-    // We must be in raw mode for the reply not to be eaten/echoed.
-    if let Ok(_raw) = RawMode::enable() {
-        let _ = out.write_all(b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\");
-        let _ = out.flush();
-        // drain replies for up to ~150ms
-        let deadline = std::time::Instant::now() + Duration::from_millis(150);
-        let mut acc = Vec::new();
-        while std::time::Instant::now() < deadline {
-            let mut b = [0u8; 64];
-            let n = unsafe {
-                libc::read(
-                    libc::STDIN_FILENO,
-                    b.as_mut_ptr() as *mut libc::c_void,
-                    b.len(),
-                )
-            };
-            if n > 0 {
-                acc.extend_from_slice(&b[..n as usize]);
-                if acc.windows(2).filter(|w| w == b"\\").count() >= 2 {
-                    break;
-                }
-            } else {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-        }
-        // parse OSC replies: "\x1b]10;rgb:rrrr/gggg/bbbb\x1b\""
-        let text = String::from_utf8_lossy(&acc).to_string();
-        for part in text.split("\x1b]").filter(|s| !s.is_empty()) {
-            if part.starts_with("10;") || part.starts_with("11;") {
-                answers.push(
-                    part.trim_end_matches('\x07')
-                        .trim_end_matches('\\')
-                        .to_string(),
-                );
-            }
-        }
-    }
-
-    let fg = answers
-        .iter()
-        .find(|a| a.starts_with("10;"))
-        .and_then(|a| parse_osc_rgb(a));
-    let bg = answers
-        .iter()
-        .find(|a| a.starts_with("11;"))
-        .and_then(|a| parse_osc_rgb(a));
-    match (fg, bg) {
-        (Some(fg), bg) => Palette {
-            fg,
-            bg: bg.unwrap_or(Rgb(0, 0, 0)),
-            has_bg: bg.is_some(),
-        },
-        _ => Palette {
-            fg: Rgb(255, 255, 255),
-            bg: Rgb(0, 0, 0),
-            has_bg: false,
-        },
-    }
-}
-
-/// Parse "10;rgb:1234/5678/9abc" into an 8-bit RGB.
-fn parse_osc_rgb(reply: &str) -> Option<Rgb> {
-    let rgb = reply.split_once("rgb:")?.1;
-    let mut chans = [0u8; 3];
-    for (i, c) in rgb.split('/').enumerate() {
-        if i > 2 {
-            break;
-        }
-        let c = c.trim();
-        let scaled = match c.len() {
-            1 => u16::from_str_radix(c, 16).ok().map(|v| v * 17),
-            2 => u16::from_str_radix(c, 16).ok(),
-            3 => u16::from_str_radix(c, 16)
-                .ok()
-                .map(|v| (v as u32 * 255 * 2 / 4095 / 2) as u16),
-            4 => u16::from_str_radix(c, 16)
-                .ok()
-                .map(|v| ((v as u32 * 255 * 2 + 65535) / 2 / 65535) as u16),
-            _ => None,
-        };
-        chans[i] = scaled? as u8;
-    }
-    Some(Rgb(chans[0], chans[1], chans[2]))
-}
-
-// ---------------------------------------------------------------------------
 // Screen helpers
 // ---------------------------------------------------------------------------
 
@@ -257,31 +120,6 @@ pub fn cursor_home() -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_rgb_replies() {
-        // 4-digit form: scale each 16-bit channel to 8-bit (with rounding)
-        assert_eq!(parse_osc_rgb("10;rgb:ffff/0000/00ff"), Some(Rgb(255, 0, 1)));
-        // 2-digit form is already 8-bit
-        assert_eq!(
-            parse_osc_rgb("11;rgb:1a2b/3c4d/5e6f"),
-            Some(Rgb(0x1a, 0x3c, 0x5e))
-        );
-        assert_eq!(parse_osc_rgb("10;rgb:ff/00/99"), Some(Rgb(255, 0, 153)));
-        assert_eq!(parse_osc_rgb("garbage"), None);
-    }
-
-    #[test]
-    fn dim_blends() {
-        let p = Palette {
-            fg: Rgb(255, 255, 255),
-            bg: Rgb(0, 0, 0),
-            has_bg: true,
-        };
-        let dim = p.dim();
-        assert!(dim.contains("38;2;"), "{dim}");
-        // 255*0.55 = 140
-        assert!(dim.contains("140;140;140"), "{dim}");
-    }
+    // term.rs is thin libc plumbing around raw mode / size / keys;
+    // behavior is covered by the E2E run against the MPRIS mock.
 }

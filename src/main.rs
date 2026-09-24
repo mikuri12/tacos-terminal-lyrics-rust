@@ -3,8 +3,11 @@ mod lyrics;
 mod player;
 mod render;
 mod term;
+mod theme;
 
 use std::io::{self, Write};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -12,13 +15,36 @@ use std::time::Duration;
 use lrc::PlaybackStatus;
 use lyrics::LyricsFinder;
 use render::{fit_big, render_big, word_cols, word_times, Font};
-use term::{clear_screen, detect_palette, hide_cursor, poll_key, show_cursor, Palette, RawMode};
+use term::{clear_screen, hide_cursor, poll_key, show_cursor, RawMode};
+use theme::Theme;
+
+/// Set by the SIGUSR1 handler: reload the theme file on the next tick.
+static RELOAD_THEME: AtomicBool = AtomicBool::new(false);
+
+extern "C" {
+    fn signal(signum: i32, handler: usize) -> usize;
+}
+
+const SIGUSR1: i32 = 10;
+
+extern "C" fn on_sigusr1(_sig: i32) {
+    RELOAD_THEME.store(true, Ordering::Relaxed);
+}
+
+/// Install the SIGUSR1 -> theme-reload hook (libc `signal` is fine here:
+/// the handler only flips an atomic).
+fn install_reload_handler() {
+    unsafe {
+        signal(SIGUSR1, on_sigusr1 as *const () as usize);
+    }
+}
 
 struct Args {
     font: Font,
     karaoke: bool,
     refresh_ms: u64,
     show_header: bool,
+    theme_path: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -26,7 +52,8 @@ fn parse_args() -> Result<Args, String> {
         font: Font::Block,
         karaoke: true,
         refresh_ms: 50,
-        show_header: true,
+        show_header: false,
+        theme_path: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -41,6 +68,10 @@ fn parse_args() -> Result<Args, String> {
                 if args.refresh_ms < 10 {
                     return Err("--refresh minimum is 10ms".into());
                 }
+            }
+            "--theme" => {
+                let v = it.next().ok_or("--theme needs a file path")?;
+                args.theme_path = Some(PathBuf::from(v));
             }
             "--help" | "-h" => {
                 print_help();
@@ -66,23 +97,35 @@ USAGE:
 It just works:
   1. finds the active MPRIS player (browser, mpv, ytmgo, spotify, vlc...)
   2. asks lrclib.net for synced lyrics (cached in ~/.cache/tacos-lyrics)
-  3. renders the current line in big letters using your terminal's
-     own colors (OSC 10/11 query - no pywal, no matugen, no config)
+  3. renders the current line in big letters, following your terminal's
+     colorscheme by default
+
+COLORS:
+  By default the lyrics use terminal palette colors, so they follow
+  your colorscheme live (no config needed).
+  A theme file overrides them; it is looked up at
+  ~/.config/tacos-lyrics/theme.txt or passed with --theme FILE.
+  Format (one per line, '#' comments):
+      sung   = #cba6f7      hex color for the words already sung
+      unsung = palette:8     palette slot for the not-yet-sung words
+      paused = dim           whole-line color while paused
+      header = default       'artist - title' line color
+  Values: #rrggbb | #rgb | palette:N | default | dim
+  Send SIGUSR1 (kill -USR1 <pid>) to reload the theme file live -
+  that's how noctalia/matugen templates recolor the running visualizer.
 
 FLAGS:
   -c, --compact    3-row compact font instead of the 5-row block font
   -b, --block      5-row block font (default)
       --no-karaoke color the whole line instead of word-by-word reveal
-      --no-header  hide the \"artist - title\" status line
       --refresh N  redraw every N milliseconds (default 50)
+      --theme FILE use this theme file instead of the default path
+      --no-header  hide the \"artist - title\" status line
   -h, --help       this help
   -V, --version    version
 
 KEYS:
-  q / Ctrl-C       quit
-
-Colors come from YOUR terminal theme; if it doesn't answer OSC queries
-the default foreground color is used."
+  q / Ctrl-C       quit"
     );
 }
 
@@ -105,8 +148,9 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let args = parse_args()?;
-    let palette = detect_palette();
+    let mut theme = Theme::load(args.theme_path.as_deref());
     let finder = LyricsFinder::new();
+    install_reload_handler();
 
     let _raw = RawMode::enable().map_err(|e| format!("not a terminal: {e}"))?;
     hide_cursor().ok();
@@ -127,6 +171,12 @@ fn run() -> Result<(), String> {
     let mut last_frame: Option<Frame> = None;
 
     loop {
+        // SIGUSR1: reload the theme file (noctalia/matugen template output)
+        if RELOAD_THEME.swap(false, Ordering::Relaxed) {
+            theme = Theme::load(args.theme_path.as_deref());
+            last_frame = None; // force redraw with the new colors
+        }
+
         // Player/track change detection (drain watcher, keep latest).
         let mut update = None;
         while let Ok(msg) = rx.try_recv() {
@@ -153,10 +203,9 @@ fn run() -> Result<(), String> {
 
         let Some((bus_name, track)) = current.clone() else {
             draw_simple(
-                &palette,
+                &theme,
                 "•••",
                 "waiting for a player…",
-                false,
                 &mut last_frame,
                 &args,
             )?;
@@ -170,10 +219,9 @@ fn run() -> Result<(), String> {
 
         let Some(lyr) = lyrics.as_ref() else {
             draw_simple(
-                &palette,
+                &theme,
                 "NO LYRICS",
                 &format!("{} — not on lrclib", track.title),
-                false,
                 &mut last_frame,
                 &args,
             )?;
@@ -190,7 +238,7 @@ fn run() -> Result<(), String> {
         if let Some(t) = player::position_of(&bus_name) {
             let frame = build_frame(lyr, t, paused, &args);
             if last_frame.as_ref() != Some(&frame) {
-                draw_lyric_frame(&palette, &frame, &track, &mut last_frame, &args)?;
+                draw_lyric_frame(&theme, &frame, &track, &mut last_frame, &args)?;
             }
         }
         thread::sleep(Duration::from_millis(args.refresh_ms));
@@ -228,8 +276,6 @@ fn build_frame(lyr: &lrc::Lyrics, t: f64, paused: bool, args: &Args) -> Frame {
             .get(idx + 1)
             .map(|l| l.time)
             .unwrap_or_else(|| start + 5.0);
-        let window = (end - start).max(0.5);
-        let _progress = ((t - start) / window).clamp(0.0, 1.0);
         // Words sung so far -> column cut in the big render
         let cols_of_words = word_cols(&line, args.font);
         let times: Vec<f64> = word_times(&line, start, end)
@@ -248,11 +294,10 @@ fn build_frame(lyr: &lrc::Lyrics, t: f64, paused: bool, args: &Args) -> Frame {
             .unwrap_or(0)
             .min(render_big(&line, args.font)[0].chars().count())
     } else if args.karaoke && paused {
-        usize::MAX // paused: whole line in dim, no karaoke sweep
+        usize::MAX // paused: whole line in the paused color, no sweep
     } else {
         0
     };
-    let _ = progress_unused();
 
     Frame {
         line,
@@ -261,23 +306,18 @@ fn build_frame(lyr: &lrc::Lyrics, t: f64, paused: bool, args: &Args) -> Frame {
     }
 }
 
-fn progress_unused() -> f64 {
-    0.0
-}
-
 /// Draw a non-lyric screen (waiting / no lyrics) as big centered text.
 fn draw_simple(
-    palette: &Palette,
+    theme: &Theme,
     big: &str,
     sub: &str,
-    paused: bool,
     last: &mut Option<Frame>,
     args: &Args,
 ) -> Result<(), String> {
     let frame = Frame {
         line: big.to_string(),
         sung_cols: 0,
-        paused,
+        paused: false,
     };
     let track = player::TrackInfo {
         title: sub.to_string(),
@@ -285,12 +325,12 @@ fn draw_simple(
         album: None,
         length: None,
     };
-    draw_lyric_frame(palette, &frame, &track, last, args)
+    draw_lyric_frame(theme, &frame, &track, last, args)
 }
 
 /// Render one frame: header line + big letters centered, karaoke coloring.
 fn draw_lyric_frame(
-    palette: &Palette,
+    theme: &Theme,
     frame: &Frame,
     track: &player::TrackInfo,
     last: &mut Option<Frame>,
@@ -308,7 +348,7 @@ fn draw_lyric_frame(
         };
         let header = format!(" {name} ");
         let hpad = cols.saturating_sub(header.chars().count());
-        out.push_str(&palette.dim());
+        out.push_str(&theme.header.sgr());
         out.push_str(&"─".repeat(hpad));
         out.push_str(&header);
         out.push_str("\x1b[0m\x1b[K\r\n");
@@ -327,22 +367,21 @@ fn draw_lyric_frame(
         out.push_str("\x1b[K");
         out.push_str(&" ".repeat(pad));
         if frame.paused {
-            // paused: whole line dim
-            out.push_str(&palette.dim());
+            out.push_str(&theme.paused.sgr());
             out.push_str(row);
             out.push_str("\x1b[0m");
         } else if args.karaoke && frame.sung_cols > 0 {
-            // sung prefix in fg color, rest dimmed
+            // sung prefix in the sung color, rest in the unsung color
             let cut = frame.sung_cols.min(width);
             let pre: String = row.chars().take(cut).collect();
             let post: String = row.chars().skip(cut).collect();
-            out.push_str(&palette.lyric());
+            out.push_str(&theme.sung.sgr());
             out.push_str(&pre);
-            out.push_str(&palette.dim());
+            out.push_str(&theme.unsung.sgr());
             out.push_str(&post);
             out.push_str("\x1b[0m");
         } else {
-            out.push_str(&palette.lyric());
+            out.push_str(&theme.sung.sgr());
             out.push_str(row);
             out.push_str("\x1b[0m");
         }

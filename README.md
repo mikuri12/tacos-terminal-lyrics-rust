@@ -26,12 +26,12 @@ simplificado a un único binario:
   player activo (reproduciendo > pausado > con pista), y si cambias de
   player o de canción se detecta solo. Los players rotos del bus se
   saltan sin romper el escaneo.
-- **Colores de tu terminal, no de pywal/matugen** — al arrancar se
-  consulta el color de primer plano y de fondo de tu terminal vía
-  OSC 10/11 (lo contestan kitty, alacritty, foot, wezterm, ghostty,
-  konsole, xterm...). La parte cantada va en tu color de texto normal y
-  la parte pendiente en una mezcla atenuada hacia el fondo. Si tu
-  terminal no contesta, se usa el color por defecto del sistema.
+- **Colores que siguen tu tema** — por defecto las letras usan slots de
+  la paleta de tu terminal, así heredan tu colorscheme (y sus cambios
+  en vivo) sin configurar nada. Si quieres colores exactos o que una
+  herramienta de theming (noctalia, matugen...) los genere, hay un
+  archivo de tema simple que se recarga con SIGUSR1 — sin pywal ni
+  dependencias: ver "Colores y temas" abajo.
 - **Karaoke palabra a palabra** — el corte de color avanza palabra por
   palabra dentro de la línea (distribución uniforme, como el modo wlrc
   del original, pero calculado al vuelo: no hay que preprocesar nada).
@@ -76,8 +76,54 @@ canción; luego sale del cache local.
    `[ti:]`/`[ar:]`), lo cachea por "artista - título", y renderiza la
    línea activa con la posición real del player consultada en cada
    frame — por eso pausar y saltar funcionan sin lógica extra.
-4. Los colores se consultan una vez al arrancar con OSC 10/11 y se
-   calculan dos tonos: normal (fg) y atenuado (fg mezclado con bg).
+4. Los colores salen de un archivo de tema simple (`~/.config/tacos-lyrics/
+   theme.txt`, o `--theme FILE`), con fallback a la paleta de la terminal;
+   ver abajo.
+
+## Colores y temas
+
+Sin configurar nada, las letras usan slots de la paleta de tu terminal
+(`38;5;N` / `39`), así siguen tu colorscheme vivo — cuando la terminal
+cambia de tema, las letras cambian con ella.
+
+Para fijar colores exactos hay un archivo de tema plano, `key = value`:
+
+```
+# ~/.config/tacos-lyrics/theme.txt
+sung   = #cba6f7      # palabras ya cantadas (karaoke)
+unsung = palette:8    # palabras pendientes
+paused = dim          # la línea entera en pausa
+header = default      # la línea "artista - título"
+```
+
+Valores: `#rrggbb`, `#rgb`, `palette:N` (slot 0-255 de tu terminal),
+`default` (primer plano normal), `dim` (atenúa el primer plano).
+
+El visualizador recarga el archivo al recibir `SIGUSR1`
+(`kill -USR1 <pid>`), así las herramientas de theming pueden recolorear
+la sesión en marcha. Hay dos plantillas en `templates/`:
+
+- **Noctalia v5** — copia `templates/noctalia-theme.txt` a
+  `~/.config/noctalia/templates/tacos-lyrics-theme.txt`,
+  `templates/tacos-lyrics-reload.sh` a
+  `~/.config/noctalia/templates/` (dale `chmod +x`), y añade a
+  `~/.config/noctalia/templates.toml`:
+
+  ```toml
+  [theme.templates.user.tacos-lyrics]
+  input_path  = "~/.config/noctalia/templates/tacos-lyrics-theme.txt"
+  output_path = "~/.config/tacos-lyrics/theme.txt"
+  post_hook   = "bash ~/.config/noctalia/templates/tacos-lyrics-reload.sh"
+  ```
+
+  Con esto, cada vez que cambies el colorscheme o el wallpaper en
+  Noctalia, el visualizador corriendo se recolorea solo (verificado:
+  Catppuccin → Everforest en vivo).
+
+- **matugen** (u otras herramientas) — cualquier plantilla que genere
+  ese mismo formato de 4 líneas sirve; con matugen sería un template
+  `.txt` con `{{colors.primary.default.hex}}` etc. y un post_hook que
+  haga `pkill -USR1 tacos-lyrics`.
 
 ## Diferencias con el original
 
@@ -88,7 +134,7 @@ canción; luego sale del cache local.
 | Formato wlrc intermedio | LRC estándar + karaoke calculado al vuelo |
 | `playerctl` + python-pyyaml/mutagen/... | Sin dependencias de runtime |
 | Config YAML + fuentes custom JSON | Flags de línea de comandos, 2 fuentes incluidas |
-| Colores no implementados | Colores del tema de tu terminal vía OSC |
+| Colores no implementados | Paleta de la terminal por defecto + archivo de tema + SIGUSR1 |
 
 La fuente de letras grandes (5 filas) y la compacta (3 filas) son las
 mismas del proyecto original.
