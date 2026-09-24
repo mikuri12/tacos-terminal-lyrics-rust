@@ -117,8 +117,12 @@ la sesión en marcha. Hay dos plantillas en `templates/`:
   ```
 
   Con esto, cada vez que cambies el colorscheme o el wallpaper en
-  Noctalia, el visualizador corriendo se recolorea solo (verificado:
-  Catppuccin → Everforest en vivo).
+  Noctalia, el visualizador corriendo se recolorea solo. La plantilla
+  usa el color **primario** del scheme para las palabras cantadas y
+  `dim` para el resto, así nunca se funde con el fondo de la terminal
+  (los tonos derivados de `surface`/`on_surface` pueden ser casi
+  idénticos al fondo). Verificado en vivo: Evie → Catppuccin con el
+  visualizador en marcha.
 
 - **matugen** (u otras herramientas) — cualquier plantilla que genere
   ese mismo formato de 4 líneas sirve; con matugen sería un template
